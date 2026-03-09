@@ -7,9 +7,6 @@ plugins {
     id("qupath-conventions")
 }
 
-//the create-extension command code (gradlew createExtension -PextensionName=MyAwesome)
-apply(from = "create-extension.gradle.kts")
-
 // TODO: Configure your extension here (please change the defaults!)
 qupathExtension {
     name = "qupath-extension-template"
@@ -35,3 +32,6 @@ dependencies {
     testImplementation(libs.junit)
 
 }
+
+//the create-extension command code (gradlew createExtension -PextensionName=MyAwesome)
+apply(from = "create-extension.gradle.kts")

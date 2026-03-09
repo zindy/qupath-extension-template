@@ -12,7 +12,13 @@ import java.nio.file.StandardCopyOption
  *   ./gradlew createExtension -PextensionName=MyExtension -Planguage=groovy
  *   ./gradlew createExtension -PextensionName=MyExtension -Planguage=both
  *
+ * In-place mode (modifies the current repo instead of creating a sibling directory):
+ *   ./gradlew createExtension -PextensionName=MyExtension -PinPlace
+ *   ./gradlew createExtension -PextensionName=MyExtension -Planguage=groovy -PinPlace
+ *
  * -Planguage accepts: java (default), groovy, both
+ * -PinPlace:          transform the current repository in-place (for use after
+ *                     "Use this template → Create a new repository" on GitHub)
  *
  * Or run without parameters to be prompted interactively:
  *   ./gradlew createExtension
@@ -23,12 +29,34 @@ tasks.register("createExtension") {
     description = "Create a new QuPath extension from this template"
 
     doLast {
+        // ── In-place flag ─────────────────────────────────────────────────────
+        val inPlace = project.hasProperty("inPlace")
+
         // ── Extension name ────────────────────────────────────────────────────
+        // Derive a best-guess name from the root folder in all modes
+        // (e.g. qupath-extension-my-awesome -> MyAwesome) so it can be used as
+        // a pre-filled default in interactive prompts and auto-resolved in-place.
+        val inferredName: String? = run {
+            val folderName = project.rootDir.name  // e.g. qupath-extension-my-awesome
+            val stripped = folderName.removePrefix("qupath-extension-")
+            if (stripped != folderName && stripped.isNotBlank())
+                stripped.split("-").joinToString("") { it.replaceFirstChar { c -> c.uppercaseChar() } }
+            else null
+        }
+
         val extensionName = if (project.hasProperty("extensionName")) {
             project.property("extensionName").toString()
+        } else if (inPlace) {
+            // In-place with no explicit name: auto-resolve from folder, no prompt
+            val name = inferredName ?: "MyExtension"
+            println("Inferred extension name from folder: $name")
+            name
         } else {
-            print("Enter extension name (e.g., MyExtension): ")
-            System.`in`.bufferedReader().readLine()?.trim() ?: "MyExtension"
+            // Interactive: show inferred name as pre-filled default
+            val nameSuggestion = inferredName ?: "MyExtension"
+            print("Enter extension name [$nameSuggestion]: ")
+            System.out.flush()
+            System.`in`.bufferedReader().readLine()?.trim()?.takeIf { it.isNotBlank() } ?: nameSuggestion
         }
 
         if (!extensionName.matches(Regex("^[A-Z][a-zA-Z0-9]*$"))) {
@@ -43,12 +71,13 @@ tasks.register("createExtension") {
             if (lang !in validLanguages)
                 throw GradleException("Invalid language '$lang'. Must be one of: ${validLanguages.joinToString()}")
             lang
-        } else if (project.hasProperty("extensionName")) {
-            // When extensionName is provided via CLI but language isn't, default to java
+        } else if (project.hasProperty("extensionName") || inPlace) {
+            // No explicit language: default to java when name came from CLI or running in-place
             "java"
         } else {
             // Interactive mode - prompt for language
-            print("Language [java/groovy/both] (default: java): ")
+            print("Language (java/groovy/both) [java]: ")
+            System.out.flush()
             val input = System.`in`.bufferedReader().readLine()?.trim()?.lowercase()
             if (input.isNullOrBlank()) "java"
             else if (input in validLanguages) input
@@ -79,12 +108,15 @@ tasks.register("createExtension") {
         println("  Package name:   $packageName")
         println("  Artifact ID:    $artifactId")
         println("  Module ID:      $moduleId")
+        if (inPlace) println("  Mode:           in-place (modifying current repository)")
         println()
 
         // ── Interactive confirmation (only when no CLI properties were given) ─
-        val interactive = !project.hasProperty("extensionName") && !project.hasProperty("language")
+        // inPlace with an inferred name counts as a CLI-style invocation — no prompts
+        val interactive = !inPlace && !project.hasProperty("extensionName") && !project.hasProperty("language")
         if (interactive) {
             print("Continue? (y/n): ")
+            System.out.flush()
             val confirm = System.`in`.bufferedReader().readLine()?.trim()?.lowercase()
             if (confirm != "y" && confirm != "yes") {
                 println("Cancelled.")
@@ -93,18 +125,33 @@ tasks.register("createExtension") {
         }
 
         // ── Target directory ──────────────────────────────────────────────────
-        val targetDir = project.rootDir.parentFile.resolve(artifactId)
-        if (targetDir.exists())
-            throw GradleException("Target directory already exists: $targetDir")
-
-        println("Creating extension at: $targetDir")
-
-        // ── Copy entire project structure ─────────────────────────────────────
-        project.copy {
-            from(project.rootDir)
-            into(targetDir)
-            exclude("build", ".gradle", ".git", ".idea", "*.iml")
+        val targetDir = if (inPlace) {
+            project.rootDir
+        } else {
+            val dir = project.rootDir.parentFile.resolve(artifactId)
+            if (dir.canonicalPath == project.rootDir.canonicalPath)
+                throw GradleException(
+                    "You are already inside '$artifactId'. " +
+                    "Did you mean to run with -PinPlace?")
+            if (dir.exists())
+                throw GradleException("Target directory already exists: $dir")
+            dir
         }
+
+        if (inPlace) {
+            println("Modifying extension in-place at: $targetDir")
+        } else {
+            println("Creating extension at: $targetDir")
+
+            // ── Copy entire project structure (only when NOT in-place) ────────
+            project.copy {
+                from(project.rootDir)
+                into(targetDir)
+                exclude("build", ".gradle", ".git", ".idea", "*.iml")
+            }
+        }
+
+        val targetPath = targetDir.toPath()
 
         // ── Helper: is this file a Groovy source file? ────────────────────────
         fun isGroovyFile(file: java.nio.file.Path): Boolean {
@@ -119,13 +166,31 @@ tasks.register("createExtension") {
         }
 
         // Collect all operations to perform AFTER the walk
-        val filesToDelete = mutableListOf<java.nio.file.Path>()
+        val filesToDelete        = mutableListOf<java.nio.file.Path>()  // language-pruned files
+        val scaffoldingToDelete  = mutableListOf<java.nio.file.Path>()  // template-only scaffolding
+
+        // Directories that should never be touched regardless of mode
+        val skipDirs = setOf(".git", ".gradle", ".github", "build")
 
         // ── Walk the tree (collect operations, don't execute deletions/renames yet) ──
-        Files.walkFileTree(targetDir.toPath(), object : SimpleFileVisitor<java.nio.file.Path>() {
+        Files.walkFileTree(targetPath, object : SimpleFileVisitor<java.nio.file.Path>() {
+
+            override fun preVisitDirectory(dir: java.nio.file.Path, attrs: BasicFileAttributes): FileVisitResult {
+                if (dir != targetPath && dir.fileName.toString() in skipDirs)
+                    return FileVisitResult.SKIP_SUBTREE
+                return FileVisitResult.CONTINUE
+            }
 
             override fun visitFile(file: java.nio.file.Path, attrs: BasicFileAttributes): FileVisitResult {
                 val fileName = file.fileName.toString()
+
+                // Scaffolding files: delete in-place, skip when copying to a new directory.
+                // "create-extension" appears in both the .kts script and its README, so one
+                // check covers both. Checked before the .md binary-skip below.
+                if (fileName.lowercase().contains("create-extension")) {
+                    if (inPlace) scaffoldingToDelete.add(file)
+                    return FileVisitResult.CONTINUE
+                }
 
                 // Always skip binary / non-text assets
                 if (fileName.endsWith(".jar")   ||
@@ -137,11 +202,6 @@ tasks.register("createExtension") {
                     fileName == "gradlew"       ||
                     fileName == "gradlew.bat"   ||
                     file.toString().contains("gradle/wrapper/gradle-wrapper.jar")) {
-                    return FileVisitResult.CONTINUE
-                }
-
-                // Always skip the scaffolding script itself
-                if (fileName.lowercase().contains("create-extension")) {
                     return FileVisitResult.CONTINUE
                 }
 
@@ -221,7 +281,7 @@ tasks.register("createExtension") {
 
                     if (modified) {
                         Files.write(file, content.toByteArray(Charsets.UTF_8))
-                        println("  Updated: ${targetDir.toPath().relativize(file)}")
+                        println("  Updated: ${targetPath.relativize(file)}")
                     }
                 } catch (e: Exception) {
                     // Skip files that cannot be read as UTF-8 text
@@ -257,12 +317,12 @@ tasks.register("createExtension") {
                     Files.createDirectories(newPath.parent)
                     
                     Files.move(file, newPath, StandardCopyOption.REPLACE_EXISTING)
-                    println("  Renamed: ${targetDir.toPath().relativize(file)} -> ${targetDir.toPath().relativize(newPath)}")
+                    println("  Renamed: ${targetPath.relativize(file)} -> ${targetPath.relativize(newPath)}")
                 } else if (newFileName != currentName) {
                     // File needs renaming but not in a template directory
                     val newPath = file.parent.resolve(newFileName)
                     Files.move(file, newPath, StandardCopyOption.REPLACE_EXISTING)
-                    println("  Renamed: ${targetDir.toPath().relativize(file)} -> $newFileName")
+                    println("  Renamed: ${targetPath.relativize(file)} -> $newFileName")
                 }
                 
                 return FileVisitResult.CONTINUE
@@ -273,30 +333,47 @@ tasks.register("createExtension") {
         System.gc()
         Thread.sleep(100)
 
-        // ── Execute deletions (files first, then directories) ────────────────
+        // ── Delete scaffolding files (in-place mode only) ────────────────────
+        scaffoldingToDelete.forEach { file ->
+            try {
+                Files.delete(file)
+                println("  Deleted scaffolding file: ${targetPath.relativize(file)}")
+            } catch (e: Exception) {
+                println("  WARNING: Could not delete ${targetPath.relativize(file)}: ${e.message}")
+            }
+        }
+
+        // ── Delete language-pruned source files ───────────────────────────────
+        val prunedLanguage = if (includeJava) "Groovy" else "Java"
         filesToDelete.forEach { file ->
             try {
                 Files.delete(file)
-                println("  Deleted (not ${if (includeJava) "Groovy" else "Java"} project): ${targetDir.toPath().relativize(file)}")
+                println("  Deleted $prunedLanguage source (not included): ${targetPath.relativize(file)}")
             } catch (e: Exception) {
-                println("  WARNING: Could not delete ${targetDir.toPath().relativize(file)}: ${e.message}")
+                println("  WARNING: Could not delete ${targetPath.relativize(file)}: ${e.message}")
             }
         }
 
         // ── Clean up ALL empty directories ────────────────────────────────────
-        // Multiple passes to clean up parent directories that become empty
+        // Multiple passes to clean up parent directories that become empty.
+        // In in-place mode we never attempt to delete the root directory itself.
         var removedAny = true
         var passCount = 0
         while (removedAny && passCount < 10) {
             removedAny = false
             passCount++
             
-            Files.walkFileTree(targetDir.toPath(), object : SimpleFileVisitor<java.nio.file.Path>() {
+            Files.walkFileTree(targetPath, object : SimpleFileVisitor<java.nio.file.Path>() {
+                override fun preVisitDirectory(dir: java.nio.file.Path, attrs: BasicFileAttributes): FileVisitResult {
+                    if (dir != targetPath && dir.fileName.toString() in skipDirs)
+                        return FileVisitResult.SKIP_SUBTREE
+                    return FileVisitResult.CONTINUE
+                }
                 override fun postVisitDirectory(dir: java.nio.file.Path, exc: java.io.IOException?): FileVisitResult {
                     try {
-                        if (dir != targetDir.toPath() && Files.list(dir).use { it.count() } == 0L) {
+                        if (dir != targetPath && Files.list(dir).use { it.count() } == 0L) {
                             Files.delete(dir)
-                            println("  Removed empty dir: ${targetDir.toPath().relativize(dir)}")
+                            println("  Removed empty dir: ${targetPath.relativize(dir)}")
                             removedAny = true
                         }
                     } catch (_: Exception) {}
@@ -305,11 +382,21 @@ tasks.register("createExtension") {
             })
         }
 
-        println("\n✓ Extension created successfully at: $targetDir")
-        println("\nNext steps:")
-        println("  1. cd $artifactId")
-        println("  2. ./gradlew build")
-        println("  3. Drag build/libs/$artifactId-*.jar onto QuPath")
+        if (inPlace) {
+            println("\nRepository converted in-place to: $extensionName")
+            println("\nNext steps:")
+            println("  1. git add -A")
+            println("  2. git commit -m \"Initialize $extensionName from qupath-extension-template\"")
+            println("  3. git push")
+            println("  4. ./gradlew build")
+            println("  5. Drag build/libs/$artifactId-*.jar onto QuPath")
+        } else {
+            println("\nExtension created successfully at: $targetDir")
+            println("\nNext steps:")
+            println("  1. cd $artifactId")
+            println("  2. ./gradlew build")
+            println("  3. Drag build/libs/$artifactId-*.jar onto QuPath")
+        }
         println()
     }
 }
