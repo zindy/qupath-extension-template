@@ -40,6 +40,18 @@ QuPath.
 
 ## Configure the extension
 
+Edit `build.gradle.kts` to specify the details of your extension
+
+```kotlin
+qupathExtension {
+  name = "qupath-extension-template"
+  group = "io.github.qupath"
+  version = releaseVersion
+  description = "A simple QuPath extension"
+  automaticModule = "io.github.qupath.extension.template"
+}
+```
+
 Edit `settings.gradle.kts` to specify which version of QuPath your extension should be compatible with, e.g.
 
 ```kotlin
@@ -48,17 +60,18 @@ qupath {
 }
 ```
 
-Edit `build.gradle.kts` to specify the details of your extension
+Unlike in the original template project, here the version is set in a separate [VERSION](VERSION) file rather than in `build.gradle.kts`.
 
-```kotlin
-qupathExtension {
-  name = "qupath-extension-template"
-  group = "io.github.qupath"
-  version = "0.1.0-SNAPSHOT"
-  description = "A simple QuPath extension"
-  automaticModule = "io.github.qupath.extension.template"
-}
+Additionally, a build and publish action is triggered *automatically* in Github if a git tag is pushed and it matches the VERSION (*sans* the `-SNAPSHOT` part). See the modified [build.yml](.github/workflows/build.yml).
+
+To trigger a build and publish action, issue the following commands from your local prompt:
 ```
+git tag -a v0.1.0 -m "Release version 0.1.0"
+git push origin v0.1.0
+```
+Once the new extension is published, you can increment the VERSION file and initiate an new round of development.
+
+
 
 
 ## Run QuPath + the extension
