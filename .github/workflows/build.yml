@@ -14,7 +14,8 @@ jobs:
   build:
     uses: qupath/actions/.github/workflows/gradle.yml@main
     with:
-      java-version: "25"
+      java-version: 25
+      java-distribution: temurin
 
   create_release:
     name: Create GitHub Release
@@ -49,4 +50,4 @@ jobs:
           files: dist/**/*.jar
           # If the tag contains 'rc' or 'beta', mark it as a pre-release in GitHub
           prerelease: ${{ contains(github.ref_name, 'rc') || contains(github.ref_name, 'beta') }}
-          generate_release_notes: true        
+          generate_release_notes: true
