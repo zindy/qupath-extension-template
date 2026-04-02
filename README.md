@@ -69,6 +69,12 @@ To trigger a build and publish action, issue the following commands from your lo
 git tag -a v0.1.0 -m "Release version 0.1.0"
 git push origin v0.1.0
 ```
+
+Or from the extension's folder, this bash one-liner:
+```
+VERSION=$(cat VERSION | sed 's/-SNAPSHOT//'); git tag -a "v$VERSION" -m "Release version $VERSION"; git push origin "v$VERSION"
+```
+
 Once the new extension is published, you can increment the VERSION file and initiate an new round of development.
 
 
